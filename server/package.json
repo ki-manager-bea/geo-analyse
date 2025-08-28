@@ -8,12 +8,12 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "cheerio": "^1.0.0",
+    "cheerio": "^1.1.2",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "playwright": "^1.46.0",
+    "express": "^4.21.2",
+    "playwright": "^1.55.0",
     "xml2js": "^0.6.2",
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
