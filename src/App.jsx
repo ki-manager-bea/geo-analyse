@@ -1,79 +1,145 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+async function parseJsonSafe(res) {
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return await res.json();
+  const text = await res.text();
+  throw new Error(`HTTP ${res.status} ${res.statusText} – keine JSON-Antwort: ${text.slice(0,200)}`);
+}
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    try {
+      const data = await parseJsonSafe(res);
+      throw new Error(data?.error ? JSON.stringify(data.error) : `HTTP ${res.status}`);
+    } catch (e) {
+      if (e.message.startsWith("HTTP")) throw e;
+      const txt = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status} ${res.statusText}: ${txt.slice(0,200)}`);
+    }
+  }
+  return await parseJsonSafe(res);
+}
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${txt.slice(0,200)}`);
+  }
+  return await parseJsonSafe(res);
+}
+
 export default function App() {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState("https://dmv-consult.de/");
   const [sampling, setSampling] = useState(true);
   const [maxSamplePages, setMaxSamplePages] = useState(10);
+  const [showDebug, setShowDebug] = useState(false);
 
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState(null);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [logs, setLogs] = useState([]);
   const pollingRef = useRef(null);
+  const abortRef = useRef(null);
 
   const canAnalyze = useMemo(() => {
     try { new URL(url); return true; } catch { return false; }
   }, [url]);
 
+  function clearPolling() {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = null;
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+  }
+
   async function startAnalyze() {
-    setResult(null); setError(""); setStatus("queued"); setProgress(0); setJobId(null);
+    setResult(null);
+    setError("");
+    setStatus("queued");
+    setProgress(0);
+    setJobId(null);
+    setLogs([]);
+    clearPolling();
+
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, sampleSitemap: sampling, maxSamplePages: Number(maxSamplePages) })
+      const data = await postJson("/api/analyze", {
+        url,
+        seedSitemap: true,
+        sampleSitemap: sampling,
+        maxSamplePages: Number(maxSamplePages),
+        crawl: true,
+        renderCrawl: true,
+        maxCrawlPages: 800,
+        deepAnalyzeLimit: 50,
+        keepHashSections: true,
+        includeParams: false,
+        includePatterns: [],
+        excludePatterns: [],
+        guessCommonPaths: true,
+        debug: showDebug
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ? JSON.stringify(data.error) : "API-Fehler");
+      if (!data?.jobId) throw new Error("Antwort ohne jobId");
       setJobId(data.jobId);
-    } catch {
+    } catch (e) {
       setStatus("error");
-      setError("API nicht erreichbar oder noch nicht vorhanden. (Backend folgt im nächsten Schritt.)");
+      setError(e.message || "Unbekannter Fehler beim Start");
     }
   }
 
   useEffect(() => {
     if (!jobId) return;
-    pollingRef.current && clearInterval(pollingRef.current);
+    clearPolling();
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
     async function tick() {
       try {
-        const r = await fetch(`/api/status/${jobId}`);
-        if (!r.ok) throw new Error("Status-API nicht erreichbar");
-        const s = await r.json();
-        setStatus(s.status); setProgress(s.progress || 0);
-        if (s.status === "done") {
-          clearInterval(pollingRef.current);
-          const rr = await fetch(`/api/result/${jobId}`);
-          const data = await rr.json();
-          setResult(data);
+        const s = await getJson(`/api/status/${jobId}`);
+        setStatus(s.status);
+        setProgress(s.progress ?? 0);
+
+        if (showDebug) {
+          const l = await getJson(`/api/logs/${jobId}`);
+          setLogs(l.logs || []);
         }
-        if (s.status === "error") clearInterval(pollingRef.current);
-      } catch {
-        setStatus("error"); setError("Polling fehlgeschlagen. Ist das Backend schon gestartet?");
-        clearInterval(pollingRef.current);
+
+        if (s.status === "done") {
+          clearPolling();
+          const data = await getJson(`/api/result/${jobId}`);
+          setResult(data);
+        } else if (s.status === "error") {
+          clearPolling();
+          setError("Job ist im Backend mit Fehler abgebrochen.");
+        }
+      } catch (e) {
+        clearPolling();
+        setStatus("error");
+        setError(e.message || "Polling fehlgeschlagen.");
       }
     }
+
     tick();
     pollingRef.current = setInterval(tick, 1500);
-    return () => pollingRef.current && clearInterval(pollingRef.current);
-  }, [jobId]);
+    return () => clearPolling();
+  }, [jobId, showDebug]);
 
   function downloadJSON() {
     if (!result) return;
     const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
     const u = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = u; a.download = "geo-analysis.json"; a.click();
+    const a = document.createElement("a");
+    a.href = u; a.download = "geo-analysis.json"; a.click();
     URL.revokeObjectURL(u);
   }
 
-  function Badge({ ok, warn, children }) {
-    const cls = ok ? "badge ok" : warn ? "badge warn" : "badge bad";
-    return <span className={cls}>{children}</span>;
-  }
-
-  const sdTypes = result?.main?.structuredData?.types || {};
-  const hasSd = !!result && Object.keys(sdTypes).length > 0;
+  const downloading = status === "running" || status === "queued";
 
   return (
     <div className="container">
@@ -85,36 +151,50 @@ export default function App() {
             placeholder="https://example.com"
             value={url}
             onChange={e => setUrl(e.target.value)}
+            disabled={downloading}
           />
-          <button onClick={startAnalyze} disabled={!canAnalyze || status === "queued" || status === "running"}>
-            {status === "running" || status === "queued" ? "Analysiere…" : "Analysieren"}
+          <button onClick={startAnalyze} disabled={!canAnalyze || downloading}>
+            {downloading ? "Analysiere…" : "Analysieren"}
           </button>
         </div>
 
-        <div className="row" style={{ marginTop: 8 }}>
+        <div className="row" style={{ marginTop: 8, gap: 20, alignItems:"center" }}>
           <label className="small">
-            <input type="checkbox" checked={sampling} onChange={e => setSampling(e.target.checked)} />
+            <input type="checkbox" checked={sampling} onChange={e => setSampling(e.target.checked)} disabled={downloading}/>
             &nbsp;Zusätzlich bis zu&nbsp;
             <input
               style={{ width: 60 }}
               type="number"
               min={1}
-              max={50}
+              max={400}
               value={maxSamplePages}
               onChange={e => setMaxSamplePages(e.target.value)}
-              disabled={!sampling}
+              disabled={!sampling || downloading}
             />
             &nbsp;Sitemap-URLs samplen
+          </label>
+
+          <label className="small">
+            <input type="checkbox" checked={showDebug} onChange={e => setShowDebug(e.target.checked)} disabled={downloading && !jobId}/>
+            &nbsp;Debug-Logs anzeigen
           </label>
         </div>
 
         {status && (
           <div style={{ marginTop: 16 }}>
-            <div className="small">Status: {status}</div>
+            <div className="small">Status: {status} ({progress || 0}%)</div>
             <div className="progress" style={{ marginTop: 6 }}>
               <div style={{ width: `${progress || 0}%` }} />
             </div>
-            {error && <div className="error">{error}</div>}
+            {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
+          </div>
+        )}
+
+        {showDebug && logs.length > 0 && (
+          <div className="card" style={{ marginTop: 12, maxHeight: 220, overflow: "auto", background: "#0f1220" }}>
+            <pre style={{ margin: 0, padding: 10, color: "#9fd3ff", fontSize: 12 }}>
+{logs.map(l => `[${l.ts}] [${l.level}] ${l.msg}${l.extra ? " " + JSON.stringify(l.extra) : ""}`).join("\n")}
+            </pre>
           </div>
         )}
       </div>
@@ -135,57 +215,11 @@ export default function App() {
             </div>
           </div>
 
-          <div className="grid" style={{ marginTop: 16 }}>
-            <div className="card">
-              <h3>Meta</h3>
-              <div className="kv">
-                <div>HTTP Status</div><div>{result.main.http.status}</div>
-                <div>Title</div><div className="wrap">{result.main.meta.title || "—"}</div>
-                <div>Meta-Description</div><div className="wrap">{result.main.meta.metaDescription || "—"}</div>
-                <div>Lang</div><div>{result.main.meta.lang || "—"}</div>
-                <div>Canonical</div><div className="wrap">{result.main.meta.canonical || "—"}</div>
-              </div>
-            </div>
-
-            <div className="card">
-              <h3>Strukturierte Daten</h3>
-              <div className="small">JSON-LD Blöcke: {result.main.structuredData.jsonLdCount}</div>
-              <pre className="code">
-                {hasSd ? JSON.stringify(sdTypes, null, 2) : "—"}
-              </pre>
-            </div>
-
-            <div className="card">
-              <h3>Headings & Bilder</h3>
-              <div className="kv">
-                <div>H1-Anzahl</div><div>{result.main.headings.h1Count}</div>
-                <div>Bilder</div><div>{result.main.images.count}</div>
-                <div>Ohne ALT</div><div>{result.main.images.missingAlt}</div>
-              </div>
-            </div>
-
-            <div className="card">
-              <h3>Social</h3>
-              <div className="badges">
-                <Badge ok={!!(result.main.social.og.title || result.main.social.og.image)}>OpenGraph</Badge>
-                <Badge ok={!!(result.main.social.twitter.card || result.main.social.twitter.title)}>Twitter Card</Badge>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 16 }}>
-            <h3>Issues</h3>
-            {result.issues.length === 0 ? (
-              <div className="small">Keine Probleme erkannt.</div>
-            ) : (
-              <ul>
-                {result.issues.map((x, i) => <li key={i}>{x}</li>)}
-              </ul>
-            )}
-          </div>
-
-          <div style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
             <button onClick={downloadJSON}>JSON exportieren</button>
+            <a href={`/api/report/${jobId}.pdf`} target="_blank" rel="noopener noreferrer">
+              <button>PDF herunterladen</button>
+            </a>
           </div>
         </div>
       )}

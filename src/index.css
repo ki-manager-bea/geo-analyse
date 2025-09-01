@@ -72,3 +72,8 @@ button:disabled{opacity:.6;cursor:not-allowed}
 
 .score{font-size:40px;font-weight:800}
 .error{margin-top:10px;color:#ff8a8a}
+.progress { background: #eee; height: 10px; border-radius: 6px; overflow: hidden; }
+.progress .progress-bar { height: 100%; background: #3b82f6; transition: width .25s ease; }
+.badge.ok { background:#e8fbe8; border:1px solid #b7e5b7; padding:2px 6px; border-radius:6px; }
+.badge.warn { background:#fff9e6; border:1px solid #ffe08a; padding:2px 6px; border-radius:6px; }
+.badge.bad { background:#fde8e8; border:1px solid #f5b4b4; padding:2px 6px; border-radius:6px; }
